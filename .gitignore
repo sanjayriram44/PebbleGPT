@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# uv / virtualenv
+.venv/
+
+# Environment
+.env
+
+# Project data — large, regenerable, never commit
+data/
+checkpoints/
+wandb/
+*.bin
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Notebooks
+.ipynb_checkpoints/
