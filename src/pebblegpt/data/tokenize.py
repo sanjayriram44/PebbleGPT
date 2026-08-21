@@ -2,22 +2,36 @@
 
 Each stored record is SEQ_LEN + 1 tokens: the loader slices it into
 x = record[:-1] and y = record[1:] for next-token prediction.
+
+Documents are tokenized in batches — HF's fast tokenizers are Rust-backed and
+parallelize across cores on batched input, but run effectively single-threaded
+when called one document at a time.
 """
 
+import os
 import time
 from pathlib import Path
 
 import numpy as np
+import transformers
 from transformers import AutoTokenizer
 
 from pebblegpt.data.download import load_source, token_budget
 from pebblegpt.data.filter import keep_document
+
+# Must be set before the tokenizer is constructed.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
+
+# Documents routinely exceed the tokenizer's declared model_max_length; we
+# repack everything into SEQ_LEN chunks anyway, so the warning is noise.
+transformers.logging.set_verbosity_error()
 
 TOKENIZER = "HuggingFaceTB/SmolLM2-360M"
 SEQ_LEN = 2048
 RECORD_LEN = SEQ_LEN + 1        # +1 so each record yields aligned (x, y)
 SHARD_TOKENS = 100_000_000      # ~200 MB per shard as uint16
 DTYPE = np.uint16               # 49,152 vocab fits
+TOKENIZE_BATCH = 1000           # documents per tokenizer call
 
 
 def get_tokenizer():
@@ -31,7 +45,8 @@ def tokenize_source(name: str,
                     out_dir: Path,
                     tokenizer=None,
                     streaming: bool = True,
-                    log_every_s: float = 5.0) -> int:
+                    log_every_s: float = 5.0,
+                    batch_size: int = TOKENIZE_BATCH) -> int:
     """Stream one source, tokenize, pack, and write shards.
 
     Stops as soon as target_tokens is reached. Returns tokens actually written.
@@ -39,11 +54,12 @@ def tokenize_source(name: str,
     tokenizer = tokenizer or get_tokenizer()
     eos = tokenizer.eos_token_id
     out_dir.mkdir(parents=True, exist_ok=True)
-
+    batch_size = min(batch_size, max(1, target_tokens // 2000))
     ds, text_col = load_source(name, streaming=streaming)
 
     buffer: list[int] = []
     records: list[np.ndarray] = []
+    pending: list[str] = []
     written = 0
     shard_idx = 0
     n_docs = 0
@@ -63,6 +79,30 @@ def tokenize_source(name: str,
         print(f"  wrote {path.name}  ({arr.size:,} tokens)", flush=True)
         records = []
         shard_idx += 1
+
+    def carve_records():
+        """Move complete records out of the buffer, flushing shards as needed."""
+        nonlocal buffer, written
+        while len(buffer) >= RECORD_LEN:
+            records.append(np.array(buffer[:RECORD_LEN], dtype=DTYPE))
+            buffer = buffer[RECORD_LEN:]
+            written += RECORD_LEN
+            if written % SHARD_TOKENS < RECORD_LEN:
+                flush_shard()
+
+    def flush_pending():
+        """Tokenize the accumulated batch and append to the buffer."""
+        nonlocal pending
+        if not pending:
+            return
+        encoded = tokenizer(pending, add_special_tokens=False)["input_ids"]
+        for ids in encoded:
+            buffer.extend(ids)
+            buffer.append(eos)
+            carve_records()
+            if written >= target_tokens:
+                break
+        pending = []
 
     def log_progress(force: bool = False):
         nonlocal last_log
@@ -87,19 +127,17 @@ def tokenize_source(name: str,
             n_dropped += 1
             continue
 
-        buffer.extend(tokenizer.encode(text))
-        buffer.append(eos)
+        pending.append(text)
         n_docs += 1
 
-        while len(buffer) >= RECORD_LEN:
-            records.append(np.array(buffer[:RECORD_LEN], dtype=DTYPE))
-            buffer = buffer[RECORD_LEN:]
-            written += RECORD_LEN
-            if written % SHARD_TOKENS < RECORD_LEN:
-                flush_shard()
+        if len(pending) >= batch_size:
+            flush_pending()
+            if written >= target_tokens:
+                break
 
-        if written >= target_tokens:
-            break
+    # tokenize whatever is left in the final partial batch
+    if written < target_tokens:
+        flush_pending()
 
     flush_shard()
     log_progress(force=True)
