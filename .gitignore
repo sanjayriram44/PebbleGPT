@@ -10,11 +10,21 @@ __pycache__/
 # Environment
 .env
 
-# Project data — large, regenerable, never commit
+# Data — large, regenerable, never commit
 data/
-checkpoints/
-wandb/
 *.bin
+
+# Model artifacts
+checkpoints/
+exports/
+
+# Run outputs
+wandb/
+logs/
+eval_results/
+
+# Caches
+.cache/
 
 # OS / editor
 .DS_Store
