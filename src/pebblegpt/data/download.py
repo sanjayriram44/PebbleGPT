@@ -40,14 +40,7 @@ SOURCES: dict[str, SourceSpec] = {
         repo="HuggingFaceTB/dclm-edu",
         config=None,
         text_col="text",
-        # Their ablation at 360M: edu_int_score >= 3 beats keeping score-2
-        # samples on MMLU and ARC.
         min_edu_score=3,
-        # Shards are ~2.8 GB each and hold roughly 700M-1B tokens. Four covers
-        # the 2.72B target; targeting files directly also avoids resolving all
-        # 1,769 of them. Small token budgets will still pull far more than they
-        # consume — unavoidable with this dataset's layout.
-        data_files=[f"data/000_{i:05d}.parquet" for i in range(4)],
     ),
     "code": SourceSpec(
         # Python-Edu with S3 contents already hydrated into a `text` column.

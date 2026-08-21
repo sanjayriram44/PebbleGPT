@@ -143,6 +143,12 @@ def tokenize_source(name: str,
     log_progress(force=True)
     print(f"{name}: {written:,} tokens from {n_docs:,} docs "
           f"({n_dropped:,}/{n_seen:,} dropped)", flush=True)
+
+    if written < target_tokens * 0.95:
+        print(f"  WARNING: {name} produced {written:,} of {target_tokens:,} "
+              f"({100 * written / target_tokens:.0f}%) — source exhausted or "
+              f"over-filtered", flush=True)
+
     return written
 
 
