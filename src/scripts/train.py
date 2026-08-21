@@ -26,6 +26,8 @@ def main():
     ap.add_argument("--wandb", action="store_true")
     ap.add_argument("--wandb-entity", default="Strectelite")
     ap.add_argument("--run-name", default="pebblegpt-320m")
+    ap.add_argument("--eval-every", type=int, default=1000)
+    ap.add_argument("--eval-limit", type=int, default=1000)
     args = ap.parse_args()
 
     if args.smoke:
@@ -45,6 +47,9 @@ def main():
             use_wandb=args.wandb,
             wandb_entity=args.wandb_entity,
             model_kwargs={"max_seq_len": 512},
+            eval_every=args.eval_every if args.eval_every else 0,
+            eval_limit=args.eval_limit,
+            eval_tasks=["hellaswag"],
         )
     else:
         cfg = TrainConfig(
@@ -56,6 +61,7 @@ def main():
             use_wandb=args.wandb,
             wandb_entity=args.wandb_entity,
             run_name=args.run_name,
+            eval_every=args.eval_every,
         )
 
     print(f"steps: {cfg.total_steps:,}  tokens/step: {cfg.tokens_per_step:,}")

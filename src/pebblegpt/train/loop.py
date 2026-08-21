@@ -4,6 +4,7 @@ Deliberately plain — no Trainer abstraction. Everything the run depends on
 is visible here.
 """
 
+import shutil
 import time
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
@@ -11,6 +12,7 @@ from pathlib import Path
 import torch
 
 from pebblegpt.data.loader import build_dataloader
+from pebblegpt.eval.harness import export_hf_model, run_eval_inline
 from pebblegpt.model.model import PebbleGPT
 from pebblegpt.train.optimizer import build_optimizer
 from pebblegpt.train.scheduler import WSDScheduler
@@ -56,6 +58,13 @@ class TrainConfig:
     run_name: str = "pebblegpt-320m"
     use_wandb: bool = False
     wandb_entity: str | None = None
+
+    # evaluation
+    eval_every: int = 0          # 0 disables; 1000 is a reasonable cadence
+    eval_limit: int = 1000       # questions per task, matching the Playbook
+    eval_tasks: list[str] = field(
+        default_factory=lambda: ["hellaswag", "piqa", "arc_easy"]
+    )
 
     # model
     model_kwargs: dict = field(default_factory=dict)
@@ -193,12 +202,48 @@ def train(cfg: TrainConfig, resume: bool = True) -> None:
                 })
 
             if step > 0 and step % cfg.ckpt_every == 0:
-                raw = getattr(model, "_orig_mod", model)   # unwrap torch.compile
+                raw = getattr(model, "_orig_mod", model)
                 path = cfg.ckpt_dir / f"ckpt_{step:07d}.pt"
                 save_checkpoint(path, raw, optimizer, scheduler,
                                 step=step, tokens_seen=tokens_seen,
                                 config=asdict(cfg), keep_last=cfg.keep_last)
                 print(f"  saved {path.name}", flush=True)
+
+            if cfg.eval_every and step > 0 and step % cfg.eval_every == 0:
+                raw = getattr(model, "_orig_mod", model)
+                ckpt = cfg.ckpt_dir / f"ckpt_{step:07d}.pt"
+                if not ckpt.exists():
+                    save_checkpoint(ckpt, raw, optimizer, scheduler,
+                                    step=step, tokens_seen=tokens_seen,
+                                    config=asdict(cfg), keep_last=cfg.keep_last)
+
+                # The harness loads a second copy of the model onto the same
+                # device; free what we can first.
+                if device_type == "cuda":
+                    torch.cuda.empty_cache()
+
+                export_dir = cfg.ckpt_dir / f"export_{step:07d}"
+                try:
+                    export_hf_model(ckpt, export_dir)
+                    scores = run_eval_inline(
+                        export_dir,
+                        tasks=cfg.eval_tasks,
+                        device=device_type,
+                        limit=cfg.eval_limit,
+                    )
+                    logger.log(step, {f"eval/{k}": v for k, v in scores.items()},
+                               force=True)
+                    print(f"  eval @ {step}: {scores}", flush=True)
+                except Exception as e:
+                    # never let an eval failure kill a training run
+                    print(f"  eval failed at step {step}: {e}", flush=True)
+                finally:
+                    shutil.rmtree(export_dir, ignore_errors=True)
+                    if device_type == "cuda":
+                        torch.cuda.empty_cache()
+
+                model.train()
+                t0 = time.time()   # don't count eval time in throughput
 
     except KeyboardInterrupt:
         print("\ninterrupted — saving before exit")
