@@ -7,8 +7,9 @@ from pebblegpt.model.SwiGLU import SwiGLU
 
 class TransformerBlock(nn.Module):
     def __init__(self, hidden_size: int = 1024, intermediate_size: int = 2816,
-             num_heads: int = 16, num_kv_heads: int = 4, max_seq_len: int = 2048,
-             rope_base: float = 10000.0, norm_eps: float = 1e-6):
+                 num_heads: int = 16, num_kv_heads: int = 4, max_seq_len: int = 2048,
+                 rope_base: float = 10000.0, norm_eps: float = 1e-6,
+                 layer_idx: int = 0):
         super().__init__()
         self.attn_norm = nn.RMSNorm(hidden_size, eps=norm_eps)
         self.attn = GQA(
@@ -17,6 +18,7 @@ class TransformerBlock(nn.Module):
             num_kv_heads=num_kv_heads,
             max_seq_len=max_seq_len,
             rope_base=rope_base,
+            layer_idx=layer_idx,
         )
         self.mlp_norm = nn.RMSNorm(hidden_size, eps=norm_eps)
         self.mlp = SwiGLU(
@@ -24,7 +26,8 @@ class TransformerBlock(nn.Module):
             intermediate_size=intermediate_size,
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.attn_norm(x))
+    def forward(self, x: torch.Tensor, past_key_values=None, past_len: int = 0):
+        x = x + self.attn(self.attn_norm(x),
+                          past_key_values=past_key_values, past_len=past_len)
         x = x + self.mlp(self.mlp_norm(x))
         return x

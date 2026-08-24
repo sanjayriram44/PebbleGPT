@@ -1,24 +1,26 @@
 """HF PreTrainedModel wrapper around PebbleGPT's blocks.
 
-Used for evaluation (LightEval) and Hub publishing. Training uses the plain
-PebbleGPT class in model.py — attribute names match, so checkpoints load
-into either without key remapping.
+Used for evaluation, generation, and Hub publishing. Training uses the plain
+PebbleGPT class in model.py — attribute names match, so checkpoints load into
+either without key remapping.
 
-Generation is not supported yet: attention has no KV cache, so generate()
-would be unusably slow. That's fine for the multiple-choice benchmarks
-(HellaSwag, PIQA, ARC, MMLU), which only need forward passes.
+KV caching uses the transformers Cache object directly rather than legacy
+tuples: Cache.update(k, v, layer_idx) appends and returns the accumulated
+keys/values, which is the stable API across versions.
 """
 
 import torch
 import torch.nn as nn
 from transformers import PreTrainedModel
+from transformers.generation import GenerationMixin
+from transformers.cache_utils import DynamicCache
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from pebblegpt.model.block import TransformerBlock
 from pebblegpt.model.configuration import PebbleGPTConfig
 
 
-class PebbleGPTForCausalLM(PreTrainedModel):
+class PebbleGPTForCausalLM(PreTrainedModel, GenerationMixin):
     config_class = PebbleGPTConfig
     base_model_prefix = "pebblegpt"
     supports_gradient_checkpointing = False
@@ -39,8 +41,9 @@ class PebbleGPTForCausalLM(PreTrainedModel):
                 max_seq_len=config.max_seq_len,
                 rope_base=config.rope_base,
                 norm_eps=config.norm_eps,
+                layer_idx=i,
             )
-            for _ in range(config.num_hidden_layers)
+            for i in range(config.num_hidden_layers)
         ])
 
         self.final_norm = nn.RMSNorm(config.hidden_size, eps=config.norm_eps)
@@ -71,10 +74,26 @@ class PebbleGPTForCausalLM(PreTrainedModel):
 
     def set_output_embeddings(self, value):
         self.proj_head = value
-        
+
     def _tie_weights(self):
         if self.config.tie_word_embeddings:
             self.proj_head.weight = self.token_embedding.weight
+
+    # --- generation --------------------------------------------------
+
+    def prepare_inputs_for_generation(self, input_ids, past_key_values=None, **kwargs):
+        """With a populated cache, only the new tokens need a forward pass."""
+        past_len = past_key_values.get_seq_length() if past_key_values is not None else 0
+        if past_len > 0:
+            input_ids = input_ids[:, past_len:]
+        return {
+            "input_ids": input_ids,
+            "past_key_values": past_key_values,
+            "use_cache": kwargs.get("use_cache", True),
+        }
+
+    def can_generate(self) -> bool:
+        return True
 
     # --- forward -----------------------------------------------------
 
@@ -90,9 +109,15 @@ class PebbleGPTForCausalLM(PreTrainedModel):
                 output_hidden_states: bool | None = None,
                 return_dict: bool | None = None,
                 **kwargs) -> CausalLMOutputWithPast:
-        """Attention is always causal, so attention_mask / position_ids /
-        past_key_values are accepted for interface compatibility and ignored."""
+        """Attention is always causal, so attention_mask and position_ids are
+        accepted for interface compatibility and ignored."""
         return_dict = return_dict if return_dict is not None else True
+        use_cache = use_cache if use_cache is not None else False
+
+        if use_cache and past_key_values is None:
+            past_key_values = DynamicCache()
+
+        past_len = past_key_values.get_seq_length() if past_key_values is not None else 0
 
         if inputs_embeds is not None:
             x = inputs_embeds
@@ -106,7 +131,7 @@ class PebbleGPTForCausalLM(PreTrainedModel):
         for block in self.blocks:
             if output_hidden_states:
                 hidden_states.append(x)
-            x = block(x)
+            x = block(x, past_key_values=past_key_values, past_len=past_len)
 
         x = self.final_norm(x)
         if output_hidden_states:
@@ -126,14 +151,14 @@ class PebbleGPTForCausalLM(PreTrainedModel):
 
         if not return_dict:
             out = (logits,)
-            if output_hidden_states:
-                out += (tuple(hidden_states),)
+            if use_cache:
+                out += (past_key_values,)
             return ((loss,) + out) if loss is not None else out
 
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
-            past_key_values=None,
+            past_key_values=past_key_values if use_cache else None,
             hidden_states=tuple(hidden_states) if output_hidden_states else None,
             attentions=None,
         )
