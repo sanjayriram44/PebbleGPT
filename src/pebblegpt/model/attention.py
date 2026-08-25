@@ -15,23 +15,39 @@ class GQA(nn.Module):
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = hidden_size // num_heads
+        self.max_seq_len = max_seq_len
+        self.rope_base = rope_base
 
         self.W_Q = nn.Linear(hidden_size, num_heads * self.head_dim, bias=False)
         self.W_K = nn.Linear(hidden_size, num_kv_heads * self.head_dim, bias=False)
         self.W_V = nn.Linear(hidden_size, num_kv_heads * self.head_dim, bias=False)
         self.W_O = nn.Linear(num_heads * self.head_dim, hidden_size, bias=False)
 
-        cos, sin = self._precompute_rope(self.head_dim, max_seq_len, rope_base)
-        self.register_buffer("rope_cos", cos, persistent=False)
-        self.register_buffer("rope_sin", sin, persistent=False)
+        # RoPE tables are derived from rope_base and head_dim on first use.
+        # Deliberately NOT registered as buffers: they aren't in the state
+        # dict, and from_pretrained zero-fills or skips non-persistent buffers,
+        # which silently turns RoPE into the identity.
+        self._rope_cache: tuple[torch.Tensor, torch.Tensor] | None = None
 
-    @staticmethod
-    def _precompute_rope(head_dim, max_seq_len, base):
-        inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
-        positions = torch.arange(max_seq_len).float()
+    def _get_rope(self, seq_len: int, device, dtype):
+        """cos/sin tables covering [0, seq_len), cached and grown as needed."""
+        cache = self._rope_cache
+        if (cache is not None
+                and cache[0].size(0) >= seq_len
+                and cache[0].device == device
+                and cache[0].dtype == dtype):
+            return cache[0][:seq_len], cache[1][:seq_len]
+
+        n = max(seq_len, self.max_seq_len)
+        inv_freq = 1.0 / (self.rope_base ** (
+            torch.arange(0, self.head_dim, 2, device=device, dtype=torch.float32)
+            / self.head_dim))
+        positions = torch.arange(n, device=device, dtype=torch.float32)
         freqs = torch.outer(positions, inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)
-        return emb.cos(), emb.sin()
+        cos, sin = emb.cos().to(dtype), emb.sin().to(dtype)
+        self._rope_cache = (cos, sin)
+        return cos[:seq_len], sin[:seq_len]
 
     @staticmethod
     def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -61,8 +77,9 @@ class GQA(nn.Module):
         V = V.view(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
 
         # 3. RoPE — these tokens sit at positions [past_len, past_len + T)
-        cos = self.rope_cos[past_len:past_len + T].unsqueeze(0).unsqueeze(0).to(Q.dtype)
-        sin = self.rope_sin[past_len:past_len + T].unsqueeze(0).unsqueeze(0).to(Q.dtype)
+        cos_all, sin_all = self._get_rope(past_len + T, Q.device, Q.dtype)
+        cos = cos_all[past_len:past_len + T].unsqueeze(0).unsqueeze(0)
+        sin = sin_all[past_len:past_len + T].unsqueeze(0).unsqueeze(0)
         Q = self._apply_rope(Q, cos, sin)
         K = self._apply_rope(K, cos, sin)
 
