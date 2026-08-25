@@ -66,6 +66,13 @@ class TrainConfig:
         default_factory=lambda: ["hellaswag", "piqa", "arc_easy"]
     )
 
+    # annealing — warm restart from a fully-decayed checkpoint with a fresh,
+    # lower peak LR and a different data mixture. Deliberately loads weights
+    # only (fresh optimizer/scheduler), since re-using decayed AdamW state
+    # doesn't make sense with a new peak LR.
+    anneal_from: Path | None = None
+    anneal_peak_lr: float = 1.2e-4
+
     # model
     model_kwargs: dict = field(default_factory=dict)
 
@@ -91,7 +98,6 @@ def train(cfg: TrainConfig, resume: bool = True) -> None:
     device = get_device(cfg.device)
     device_type = device.type
 
-    # bfloat16 needs no GradScaler, unlike fp16
     autocast_dtype = torch.bfloat16 if cfg.dtype == "bfloat16" else torch.float32
     use_autocast = device_type in ("cuda", "cpu")
 
@@ -102,18 +108,28 @@ def train(cfg: TrainConfig, resume: bool = True) -> None:
           f"({cfg.micro_batch_size} x {cfg.grad_accum_steps} x {cfg.seq_len})")
     print(f"schedule: {cfg.total_steps:,} steps for {cfg.total_tokens:,} tokens")
 
+    start_step, tokens_seen = 0, 0
+
+    # --- weight loading: anneal (weights only) vs. resume (full state) ---
+    if cfg.anneal_from is not None:
+        ckpt = torch.load(cfg.anneal_from, map_location=str(device), weights_only=False)
+        model.load_state_dict(ckpt["model"])
+        print(f"annealing from {cfg.anneal_from} "
+              f"(base model: step {ckpt['step']:,}, {ckpt['tokens_seen']:,} tokens)")
+
+    peak_lr = cfg.anneal_peak_lr if cfg.anneal_from is not None else cfg.peak_lr
+
     optimizer = build_optimizer(
-        model, lr=cfg.peak_lr, weight_decay=cfg.weight_decay,
+        model, lr=peak_lr, weight_decay=cfg.weight_decay,
         beta1=cfg.beta1, beta2=cfg.beta2, device_type=device_type,
     )
     scheduler = WSDScheduler(
-        optimizer, total_steps=cfg.total_steps, peak_lr=cfg.peak_lr,
+        optimizer, total_steps=cfg.total_steps, peak_lr=peak_lr,
         min_lr=cfg.min_lr, warmup_steps=cfg.warmup_steps,
         decay_fraction=cfg.decay_fraction,
     )
 
-    start_step, tokens_seen = 0, 0
-    if resume:
+    if cfg.anneal_from is None and resume:
         latest = find_latest(cfg.ckpt_dir)
         if latest is not None:
             meta = load_checkpoint(latest, model, optimizer, scheduler,
@@ -173,7 +189,6 @@ def train(cfg: TrainConfig, resume: bool = True) -> None:
                 else:
                     _, loss = model(x, targets=y)
 
-                # scale so accumulated grads equal the mean over the full batch
                 loss = loss / cfg.grad_accum_steps
                 loss.backward()
                 loss_total += loss.item()
@@ -217,8 +232,6 @@ def train(cfg: TrainConfig, resume: bool = True) -> None:
                                     step=step, tokens_seen=tokens_seen,
                                     config=asdict(cfg), keep_last=cfg.keep_last)
 
-                # The harness loads a second copy of the model onto the same
-                # device; free what we can first.
                 if device_type == "cuda":
                     torch.cuda.empty_cache()
 
@@ -235,7 +248,6 @@ def train(cfg: TrainConfig, resume: bool = True) -> None:
                                force=True)
                     print(f"  eval @ {step}: {scores}", flush=True)
                 except Exception as e:
-                    # never let an eval failure kill a training run
                     print(f"  eval failed at step {step}: {e}", flush=True)
                 finally:
                     shutil.rmtree(export_dir, ignore_errors=True)
@@ -243,7 +255,7 @@ def train(cfg: TrainConfig, resume: bool = True) -> None:
                         torch.cuda.empty_cache()
 
                 model.train()
-                t0 = time.time()   # don't count eval time in throughput
+                t0 = time.time()
 
     except KeyboardInterrupt:
         print("\ninterrupted — saving before exit")
@@ -254,7 +266,6 @@ def train(cfg: TrainConfig, resume: bool = True) -> None:
         raise
 
     else:
-        # only on clean completion — a crash must not leave a "final" marker
         raw = getattr(model, "_orig_mod", model)
         save_checkpoint(cfg.ckpt_dir / "ckpt_final.pt", raw, optimizer,
                         scheduler, step=cfg.total_steps, tokens_seen=tokens_seen,
