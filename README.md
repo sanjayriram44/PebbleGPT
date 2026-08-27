@@ -174,39 +174,39 @@ One A100 80GB, 20 minutes.
 
     src/pebblegpt/
       model/
-        attention.py       Grouped query attention with RoPE and KV cache
-        SwiGLU.py           Gated feedforward layer
-        block.py             Transformer block, pre-norm
-        model.py              PebbleGPT, the training-time model
-        modeling.py            HuggingFace-compatible wrapper with generation
-        configuration.py        HuggingFace config class
+        attention.py       
+        SwiGLU.py          
+        block.py             
+        model.py             
+        modeling.py            
+        configuration.py        
       data/
-        download.py              Source registry and mixture ratios
-        filter.py                 N-gram repetition filter
-        tokenize.py                Batched tokenization, packing, sharding
-        shuffle.py                  Sequence-level shuffle across sources
-        loader.py                    Memory-mapped dataset
-        sft_dataset.py                 ChatML formatting and loss masking
-        anneal_sources.py                Annealing phase data sources
+        download.py              
+        filter.py               
+        tokenize.py               
+        shuffle.py                  
+        loader.py                    
+        sft_dataset.py                 
+        anneal_sources.py               
       train/
-        scheduler.py       Warmup-Stable-Decay
-        optimizer.py         AdamW with weight decay exclusions
-        loop.py                Training loop, gradient accumulation, MFU tracking
+        scheduler.py       
+        optimizer.py         
+        loop.py                
       eval/
-        harness.py       Export to HF format, run lm-evaluation-harness
+        harness.py       
       utils/
-        checkpoint.py       Atomic saves with full resume state
-        logging.py             Console, JSONL, and Weights and Biases
+        checkpoint.py       
+        logging.py             
 
     src/scripts/
-      prepare_data.py            Pretraining data pipeline
-      prepare_anneal_data.py       Annealing data pipeline
-      train.py                       Pretraining and annealing
-      train_sft.py                     Supervised fine-tuning
-      benchmark_sft.py                   Batch size and sequence length sweep
-      evaluate.py                          Export and evaluate a checkpoint
-      inspect_data.py                        Decode packed records for review
-      diagnose_filter.py                       Break down filter rejection reasons
+      prepare_data.py            
+      prepare_anneal_data.py       
+      train.py                       
+      train_sft.py                     
+      benchmark_sft.py                   
+      evaluate.py                          
+      inspect_data.py                        
+      diagnose_filter.py                      
 
 ## Reproducing
 
